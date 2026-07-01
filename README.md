@@ -42,9 +42,18 @@ Requires `bash`, `git`, `jq` (runtime also uses `tmux`, `docker`, `lsof`).
 
 ```bash
 git clone https://github.com/chlee1001/wtm-cli ~/tools/wtm
-ln -sf ~/tools/wtm/bin/wtm ~/.local/bin/wtm    # any dir on your PATH
+
+# put `wtm` on your PATH (create the dir first — it may not exist yet)
+mkdir -p ~/.local/bin
+ln -sf ~/tools/wtm/bin/wtm ~/.local/bin/wtm
+
+# if ~/.local/bin isn't on your PATH yet, add it (zsh) and reload the shell:
+#   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh
+
 wtm help
 ```
+
+Any directory on your `$PATH` works — `~/.local/bin` is just a common choice.
 
 ## Quickstart
 

@@ -40,9 +40,18 @@ slot 1에 배정된 `FOO-1`은 언제나 같은 포트다.
 
 ```bash
 git clone https://github.com/chlee1001/wtm-cli ~/tools/wtm
-ln -sf ~/tools/wtm/bin/wtm ~/.local/bin/wtm    # PATH에 있는 아무 디렉토리
+
+# `wtm`을 PATH에 올린다 (디렉토리가 없을 수 있으니 먼저 만든다)
+mkdir -p ~/.local/bin
+ln -sf ~/tools/wtm/bin/wtm ~/.local/bin/wtm
+
+# ~/.local/bin 이 아직 PATH에 없으면 추가하고 셸을 다시 로드한다 (zsh):
+#   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && exec zsh
+
 wtm help
 ```
+
+PATH에 있는 디렉토리면 어디든 된다 — `~/.local/bin`은 흔한 선택일 뿐이다.
 
 ## 빠른 시작
 
