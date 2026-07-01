@@ -139,6 +139,19 @@ wtm delete FOO-1 --prune-branch
 
 `--target`은 컴포넌트 이름, 쉼표 목록, 또는 `all`을 받는다. `--type`은 `feature`·`fix`·`refactor`.
 
+GUI/도구 연동용 machine-readable 출력은 다음 명령에서 `--json`으로 사용할 수 있다.
+
+```bash
+wtm doctor --json
+wtm status --json [TICKET]
+wtm list --json
+wtm slots --json
+```
+
+JSON 출력은 추가 기능이다. 기본 human-readable 출력은 그대로 유지한다. 오류 payload에는
+`missing_config`, `invalid_config_json`, `unknown_component`, `slot_exhausted`,
+`invalid_template_token` 같은 안정적인 machine code가 포함된다.
+
 ## 슬롯 동작 방식
 
 `slot 0`은 공유 baseline이고 티켓에 배정하지 않는다. 티켓은 `1 .. maxSlots-1`을 받는다.
@@ -156,7 +169,7 @@ slot 1 → api 8081 / web 4201        slot 2 → api 8082 / web 4202
 for t in tests/*.sh; do bash "$t"; done
 ```
 
-11개 스위트, 122개 검사. 실제 `git worktree`와 `tmux`로 도는 e2e를 포함한다.
+13개 스크립트, 151개 활성 검사. JSON 계약 회귀 테스트와 실제 `git worktree`/`tmux` e2e를 포함한다.
 
 ## 구조
 

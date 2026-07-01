@@ -141,6 +141,19 @@ Usable in `start`, `install`, `env`, `compose`, `seed`, `health`:
 
 `--target` takes a component name, a comma‑list, or `all`. `--type` is `feature`, `fix`, or `refactor`.
 
+Machine-readable output for GUI/tooling integrations is available with `--json` on:
+
+```bash
+wtm doctor --json
+wtm status --json [TICKET]
+wtm list --json
+wtm slots --json
+```
+
+JSON output is additive: the default human-readable output remains unchanged. Error payloads include stable
+machine codes such as `missing_config`, `invalid_config_json`, `unknown_component`, `slot_exhausted`, and
+`invalid_template_token`.
+
 ## How slots work
 
 `slot 0` is a shared baseline (never assigned to a ticket). Tickets get `1 .. maxSlots-1`.
@@ -158,7 +171,7 @@ Adjust the count anytime with `wtm slots --max N` (refuses to shrink below an in
 for t in tests/*.sh; do bash "$t"; done
 ```
 
-11 suites, 122 checks — including real `git worktree` and `tmux` end‑to‑end runs.
+13 scripts, 151 active checks — including JSON contract regressions plus real `git worktree` and `tmux` end‑to‑end runs.
 
 ## Layout
 
