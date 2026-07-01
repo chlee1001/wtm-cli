@@ -31,7 +31,7 @@ load_config() {
   [[ -f "${WTM_CONFIG}" ]] || return 1
   jq -e . "${WTM_CONFIG}" >/dev/null 2>&1 || {
     echo "Error: invalid JSON in ${WTM_CONFIG}" >&2
-    return 1
+    return 2
   }
   WTM_ROOT="$(cd "$(dirname "$(dirname "${WTM_CONFIG}")")" && pwd)"
   export WTM_CONFIG WTM_ROOT
@@ -100,6 +100,9 @@ cfg_port_base() { # <comp> <portname>
 cfg_port() { # <comp> <portname> <slot>
   local base; base="$(cfg_port_base "$1" "$2")"
   [[ -n "${base}" ]] || { return 0; }
+  # No resolvable port when the slot is unassigned/non-numeric (for example
+  # status for a ticket that has a worktree but no slot).
+  [[ "$3" =~ ^[0-9]+$ ]] || { return 0; }
   printf '%s\n' "$(( base + $3 ))"
 }
 

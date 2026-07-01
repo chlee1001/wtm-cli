@@ -7,12 +7,37 @@ GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC
 info()    { echo -e "${CYAN}$*${NC}"; }
 warn()    { echo -e "${YELLOW}$*${NC}"; }
 success() { echo -e "${GREEN}$*${NC}"; }
-die()     { echo -e "${RED}Error: $*${NC}" >&2; exit 1; }
+
+json_escape() {
+  local s="${1:-}"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"; s="${s//$'\r'/\\r}"; s="${s//$'\t'/\\t}"
+  printf '"%s"' "${s}"
+}
+
+json_error_payload() { # <code> <message>
+  local code="$1" message="$2"
+  printf '{"schemaVersion":1,"ok":false,"errors":[{"code":%s,"severity":"error","message":%s}],"warnings":[]}\n' \
+    "$(json_escape "${code}")" "$(json_escape "${message}")"
+}
+
+die_code() { # <machine-code> <message...>
+  local code="$1"; shift || true
+  local message="$*"
+  if [[ "${JSON_OUTPUT:-false}" == "true" ]]; then
+    json_error_payload "${code}" "${message}"
+  else
+    echo -e "${RED}Error: ${message}${NC}" >&2
+  fi
+  exit 1
+}
+
+die() { die_code "general_error" "$*"; }
 
 require_cmds() {
   local missing=() dep
   for dep in "$@"; do command -v "${dep}" >/dev/null 2>&1 || missing+=("${dep}"); done
-  (( ${#missing[@]} == 0 )) || die "Missing required command(s): ${missing[*]}"
+  (( ${#missing[@]} == 0 )) || die_code "missing_tool" "Missing required command(s): ${missing[*]}"
 }
 
 # --- validation ------------------------------------------------------------

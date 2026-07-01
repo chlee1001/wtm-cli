@@ -126,9 +126,9 @@ stop_slot() { # <slot> <ticket> [force]
 
 run_ticket() { # <ticket> <no_install>
   local ticket="$1" no_install="${2:-false}" slot_info slot state comp wpath
-  slot_info="$(get_or_assign_slot "${ticket}")" || die "All slots are in use"
+  slot_info="$(get_or_assign_slot "${ticket}")" || die_code "slot_exhausted" "All slots are in use"
   read -r slot state <<< "${slot_info}"
-  preflight_slot "${slot}" "${ticket}" || return 1
+  preflight_slot "${slot}" "${ticket}" || die_code "port_conflict" "Port conflict for slot ${slot}"
 
   while IFS= read -r comp; do
     wpath="$(find_worktree_path_by_comp "${comp}" "${ticket}")"; [[ -n "${wpath}" ]] || continue
