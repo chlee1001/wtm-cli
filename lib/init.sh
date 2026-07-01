@@ -72,8 +72,168 @@ wtm_init() {
   info "Next: review .wtm/config.json (start commands, env/seed if needed), then: wtm doctor && wtm up TICKET"
 }
 
+component_template_fields() { # <comp> -> TSV: field template
+  local c="$1"
+  jq -r --arg c "${c}" '
+    [
+      [("components." + $c + ".install"), (.components[$c].install // "")],
+      [("components." + $c + ".start"), (.components[$c].start // "")],
+      [("components." + $c + ".health"), (.components[$c].health // "")],
+      [("components." + $c + ".compose.project"), (.components[$c].compose.project // "")]
+    ]
+    + ((.components[$c].env.set // {}) | to_entries | map([("components." + $c + ".env.set." + .key), (.value // "")]))
+    + ((.components[$c].guide // []) | to_entries | map([("components." + $c + ".guide[" + (.key|tostring) + "]"), (.value // "")]))
+    | .[]
+    | select(.[1] != null and .[1] != "")
+    | @tsv
+  ' "${WTM_CONFIG}"
+}
+
+template_token_diagnostics() { # TSV: severity code component field token message
+  local c field template raw token name rest pcomp pname base
+  while IFS= read -r c; do
+    [[ -n "${c}" ]] || continue
+    while IFS=$'\t' read -r field template; do
+      [[ -n "${template}" ]] || continue
+      while IFS= read -r raw; do
+        [[ -n "${raw}" ]] || continue
+        token="${raw#\{}"; token="${token%\}}"
+        case "${token}" in
+          slot|ticket|path|repoMain|sessionPrefix|home) ;;
+          shellenv.*)
+            name="${token#shellenv.}"
+            [[ "${name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || \
+              printf 'error\tinvalid_template_token\t%s\t%s\t%s\t%s\n' "${c}" "${field}" "${token}" "[${c}] ${field} references invalid shellenv token '${token}'"
+            ;;
+          port.*)
+            name="${token#port.}"
+            base="$(cfg_port_base "${c}" "${name}")"
+            [[ -n "${name}" && -n "${base}" ]] || \
+              printf 'error\tinvalid_template_token\t%s\t%s\t%s\t%s\n' "${c}" "${field}" "${token}" "[${c}] ${field} references unknown port '${name}'"
+            ;;
+          peer.*)
+            rest="${token#peer.}"
+            if [[ "${rest}" != *".port."* ]]; then
+              printf 'error\tinvalid_template_token\t%s\t%s\t%s\t%s\n' "${c}" "${field}" "${token}" "[${c}] ${field} has malformed peer token '${token}'"
+              continue
+            fi
+            pcomp="${rest%%.port.*}"
+            pname="${rest#*.port.}"
+            if [[ -z "${pcomp}" || -z "${pname}" ]]; then
+              printf 'error\tinvalid_template_token\t%s\t%s\t%s\t%s\n' "${c}" "${field}" "${token}" "[${c}] ${field} has malformed peer token '${token}'"
+            elif ! cfg_has_component "${pcomp}"; then
+              printf 'error\tinvalid_template_token\t%s\t%s\t%s\t%s\n' "${c}" "${field}" "${token}" "[${c}] ${field} references unknown peer component '${pcomp}'"
+            else
+              base="$(cfg_port_base "${pcomp}" "${pname}")"
+              [[ -n "${base}" ]] || \
+                printf 'error\tinvalid_template_token\t%s\t%s\t%s\t%s\n' "${c}" "${field}" "${token}" "[${c}] ${field} references unknown peer port '${pcomp}.${pname}'"
+            fi
+            ;;
+          *)
+            printf 'error\tinvalid_template_token\t%s\t%s\t%s\t%s\n' "${c}" "${field}" "${token}" "[${c}] ${field} references unknown token '${token}'"
+            ;;
+        esac
+      done < <(grep -oE '\{[^}]+\}' <<< "${template}" || true)
+    done < <(component_template_fields "${c}")
+  done < <(cfg_components)
+}
+
+wtm_doctor_json() {
+  local rc=0
+  load_config || rc=$?
+  case "${rc}" in
+    0) ;;
+    2) json_error_payload "invalid_config_json" "Invalid JSON in .wtm/config.json"; return 1 ;;
+    *) json_error_payload "missing_config" "No .wtm/config.json found (run: wtm init)"; return 1 ;;
+  esac
+
+  local errs=0 warns=0 diagnostics='[]' tools='[]'
+  add_diag() { # <severity> <code> <message> [component] [field] [token]
+    local severity="$1" code="$2" message="$3" component="${4:-}" field="${5:-}" token="${6:-}"
+    diagnostics="$(jq -c --arg severity "${severity}" --arg code "${code}" --arg message "${message}" \
+      --arg component "${component}" --arg field "${field}" --arg token "${token}" '
+      . + [{
+        severity:$severity,
+        code:$code,
+        message:$message,
+        component:(if $component == "" then null else $component end),
+        field:(if $field == "" then null else $field end),
+        token:(if $token == "" then null else $token end)
+      }]' <<< "${diagnostics}")"
+    [[ "${severity}" == "error" ]] && errs=$((errs + 1)) || warns=$((warns + 1))
+  }
+
+  local proj; proj="$(cfg_project)"
+  [[ -z "${proj}" || "${proj}" == "null" ]] && add_diag error invalid_config "missing 'project'" "" "project"
+
+  local pat; pat="$(cfg_ticket_pattern)"
+  if ! printf 'TEST-1' | grep -qE "${pat}" 2>/dev/null; then
+    add_diag warning invalid_config "ticketPattern may be too strict: ${pat}" "" "ticketPattern"
+  fi
+
+  local comps c; comps="$(cfg_components)"
+  [[ -z "${comps}" ]] && add_diag error invalid_config "no components defined" "" "components"
+  while IFS= read -r c; do
+    [[ -n "${c}" ]] || continue
+    local repo; repo="$(cfg_comp_repo_abs "${c}")"
+    if [[ -d "${repo}" ]]; then
+      if [[ -e "${repo}/.git" ]]; then
+        if [[ -z "$(git -C "${repo}" rev-list -n1 --all 2>/dev/null)" ]]; then
+          add_diag warning empty_repo "[${c}] repo has no commits yet — 'wtm up' needs a commit on '$(cfg_base_branch)'" "${c}" "components.${c}.repo"
+        fi
+      else
+        add_diag warning invalid_repo "[${c}] repo is not a git repo — worktree ops will fail" "${c}" "components.${c}.repo"
+      fi
+    else
+      add_diag warning missing_repo "[${c}] repo path not found: ${repo}" "${c}" "components.${c}.repo"
+    fi
+    if [[ "$(cfg_comp_runtime "${c}")" == "managed" && -z "$(cfg_comp_start "${c}")" ]]; then
+      add_diag warning missing_start "[${c}] runtime=managed but no start command" "${c}" "components.${c}.start"
+    fi
+  done <<< "${comps}"
+
+  local severity code component field token message
+  while IFS=$'\t' read -r severity code component field token message; do
+    [[ -n "${severity}" ]] || continue
+    add_diag "${severity}" "${code}" "${message}" "${component}" "${field}" "${token}"
+  done < <(template_token_diagnostics)
+
+  local t found path
+  for t in git jq tmux docker lsof; do
+    if command -v "${t}" >/dev/null 2>&1; then
+      found=true; path="$(command -v "${t}")"
+    else
+      found=false; path=""
+      add_diag warning missing_tool "missing tool: ${t} (needed for run/stop)" "" "tools.${t}"
+    fi
+    tools="$(jq -c --arg name "${t}" --argjson found "${found}" --arg path "${path}" '. + [{name:$name,found:$found,path:$path}]' <<< "${tools}")"
+  done
+
+  jq -n --argjson ok "$([[ ${errs} -eq 0 ]] && echo true || echo false)" \
+    --arg command doctor --arg root "${WTM_ROOT}" --arg config "${WTM_CONFIG}" --arg project "${proj}" \
+    --argjson errors "${errs}" --argjson warnings "${warns}" --argjson diagnostics "${diagnostics}" --argjson tools "${tools}" '
+    {
+      schemaVersion:1,
+      ok:$ok,
+      command:$command,
+      projectRoot:$root,
+      configPath:$config,
+      data:{project:$project, errorCount:$errors, warningCount:$warnings, diagnostics:$diagnostics, tools:$tools},
+      warnings:($diagnostics | map(select(.severity == "warning"))),
+      errors:($diagnostics | map(select(.severity == "error")))
+    }'
+  (( errs == 0 ))
+}
+
 wtm_doctor() {
-  load_config || die "No .wtm/config.json found (run: wtm init)"
+  if [[ "${JSON_OUTPUT:-false}" == "true" ]]; then wtm_doctor_json; return $?; fi
+  local rc=0
+  load_config || rc=$?
+  case "${rc}" in
+    0) ;;
+    2) die_code "invalid_config_json" "Invalid JSON in .wtm/config.json" ;;
+    *) die_code "missing_config" "No .wtm/config.json found (run: wtm init)" ;;
+  esac
   local errs=0 warns=0
   err(){ echo -e "${RED}  x $*${NC}"; errs=$((errs + 1)); }
   wrn(){ echo -e "${YELLOW}  ! $*${NC}"; warns=$((warns + 1)); }
@@ -111,6 +271,12 @@ wtm_doctor() {
       wrn "[${c}] runtime=managed but no start command"
     fi
   done <<< "${comps}"
+
+  local severity code component field token message
+  while IFS=$'\t' read -r severity code component field token message; do
+    [[ -n "${severity}" ]] || continue
+    if [[ "${severity}" == "error" ]]; then err "${message}"; else wrn "${message}"; fi
+  done < <(template_token_diagnostics)
 
   local t
   for t in git jq tmux docker lsof; do
