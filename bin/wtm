@@ -43,7 +43,7 @@ EOF
 }
 
 # --- flag parsing ----------------------------------------------------------
-TARGET="all"; TYPE="feature"; BASE=""; NO_INSTALL="false"; SKIP_SEED=""
+TARGET="all"; TYPE="feature"; BASE=""; NO_INSTALL="false"; SKIP_SEED=""; JSON_OUTPUT="false"
 LIST_MODE="grouped"; FORCE="false"; PRUNE="false"; LINES="120"; MAX=""; POS=()
 
 parse_flags() {
@@ -60,6 +60,7 @@ parse_flags() {
       --prune-branch) PRUNE="true"; shift;;
       --lines) LINES="$2"; shift 2;;
       --max|-n) MAX="$2"; shift 2;;
+      --json) JSON_OUTPUT="true"; shift;;
       -h|--help) usage; exit 0;;
       --*) die "Unknown option: $1";;
       *) POS+=("$1"); shift;;
@@ -67,7 +68,15 @@ parse_flags() {
   done
 }
 
-need_config() { load_config || die "No .wtm/config.json found. Run 'wtm init' in your project root."; }
+need_config() {
+  local rc=0
+  load_config || rc=$?
+  case "${rc}" in
+    0) return 0 ;;
+    2) die_code "invalid_config_json" "Invalid JSON in .wtm/config.json" ;;
+    *) die_code "missing_config" "No .wtm/config.json found. Run 'wtm init' in your project root." ;;
+  esac
+}
 
 positional_is_component() { [[ "$1" == "all" || "$1" == *,* ]] || cfg_has_component "$1"; }
 
@@ -79,8 +88,32 @@ consume_target_type() {
 
 comps_arg() { [[ "${TARGET}" == "all" ]] && echo "all" || echo "${TARGET//,/ }"; }
 
+json_envelope() { # <command> <data-json>
+  local command="$1" data="$2"
+  jq -n --arg command "${command}" --arg root "${WTM_ROOT:-}" --arg config "${WTM_CONFIG:-}" --argjson data "${data}" \
+    '{schemaVersion:1, ok:true, command:$command, projectRoot:$root, configPath:$config, data:$data, warnings:[], errors:[]}'
+}
+
+component_statuses_json() { # <slot>
+  local slot="$1" comp state arr='[]'
+  while IFS= read -r comp; do
+    [[ -n "${comp}" ]] || continue
+    if is_managed "${comp}"; then state="$(component_status "${comp}" "${slot}")"; else state="GUIDE"; fi
+    arr="$(jq -c --arg name "${comp}" --arg state "${state}" '. + [{name:$name,state:$state}]' <<< "${arr}")"
+  done < <(cfg_components)
+  printf '%s\n' "${arr}"
+}
+
+status_row_json() { # <slot> <ticket>
+  local slot="$1" ticket="$2" comps
+  comps="$(component_statuses_json "${slot}")"
+  jq -n -c --arg slot "${slot}" --arg ticket "${ticket}" --argjson components "${comps}" \
+    '{slot:$slot,ticket:$ticket,components:$components}'
+}
+
 # --- presentation ----------------------------------------------------------
 list_worktrees() {
+  if [[ "${JSON_OUTPUT}" == "true" ]]; then list_worktrees_json; return 0; fi
   local records mode="${1:-grouped}"; records="$(worktree_list_records)"
   [[ -n "${records}" ]] || { echo "No worktrees found."; return 0; }
   case "${mode}" in
@@ -122,6 +155,7 @@ status_row() {
 
 cmd_status() {
   need_config
+  if [[ "${JSON_OUTPUT}" == "true" ]]; then cmd_status_json "${1:-}"; return 0; fi
   printf "%-6s %-18s %s\n" SLOT TICKET COMPONENTS
   printf '%s\n' '--------------------------------------------------------------'
   local ticket="${1:-}" slot max
@@ -136,6 +170,29 @@ cmd_status() {
     ticket="$(find_ticket_by_slot "${slot}")"; [[ -n "${ticket}" ]] || ticket="-"
     status_row "${slot}" "${ticket}"
   done
+}
+
+cmd_status_json() {
+  local ticket="${1:-}" slot max rows='[]' row
+  if [[ -n "${ticket}" ]]; then
+    slot="$(get_slot_for_ticket "${ticket}")"
+    if [[ -n "${slot}" ]]; then
+      row="$(status_row_json "${slot}" "${ticket}")"
+    elif has_any_worktree "${ticket}"; then
+      row="$(status_row_json "-" "${ticket}")"
+    else
+      die "No slot/worktree for ${ticket}"
+    fi
+    rows="$(jq -c --argjson row "${row}" '. + [$row]' <<< "${rows}")"
+  else
+    max="$(cfg_max_slots)"
+    row="$(status_row_json 0 "$(cfg_reserved0)")"; rows="$(jq -c --argjson row "${row}" '. + [$row]' <<< "${rows}")"
+    for slot in $(seq 1 $((max - 1))); do
+      ticket="$(find_ticket_by_slot "${slot}")"; [[ -n "${ticket}" ]] || ticket="-"
+      row="$(status_row_json "${slot}" "${ticket}")"; rows="$(jq -c --argjson row "${row}" '. + [$row]' <<< "${rows}")"
+    done
+  fi
+  json_envelope "status" "$(jq -n -c --argjson rows "${rows}" '{rows:$rows}')"
 }
 
 # Set maxSlots in the config, with safety checks.
@@ -160,6 +217,7 @@ cmd_set_max_slots() {
 
 cmd_slots() {
   need_config
+  if [[ "${JSON_OUTPUT}" == "true" ]]; then cmd_slots_json; return 0; fi
   local max; max="$(cfg_max_slots)"
   info "maxSlots: ${max}  (usable ticket slots 1..$((max - 1)); slot 0 = $(cfg_reserved0)). Change with: wtm slots --max N"
   printf "%-6s %-18s %s\n" SLOT TICKET PORTS
@@ -176,35 +234,68 @@ cmd_slots() {
   done < <(jq -r '.slots | to_entries | sort_by(.value) | .[] | "\(.key) \(.value)"' "$(slots_file)")
 }
 
+cmd_slots_json() {
+  local max; max="$(cfg_max_slots)"
+  ensure_slots_file
+  local assignments='[]' ticket slot comp name port ports assignment
+  while IFS=' ' read -r ticket slot; do
+    [[ -n "${ticket}" ]] || continue
+    ports='[]'
+    while IFS= read -r comp; do
+      while read -r name port; do
+        [[ -n "${port}" ]] || continue
+        ports="$(jq -c --arg component "${comp}" --arg name "${name}" --argjson port "${port}" \
+          '. + [{component:$component,name:$name,port:$port}]' <<< "${ports}")"
+      done < <(comp_ports "${comp}" "${slot}")
+    done < <(cfg_components)
+    assignment="$(jq -n -c --arg ticket "${ticket}" --argjson slot "${slot}" --argjson ports "${ports}" \
+      '{ticket:$ticket,slot:$slot,ports:$ports}')"
+    assignments="$(jq -c --argjson assignment "${assignment}" '. + [$assignment]' <<< "${assignments}")"
+  done < <(jq -r '.slots | to_entries | sort_by(.value) | .[] | "\(.key) \(.value)"' "$(slots_file)")
+  json_envelope "slots" "$(jq -n -c --argjson maxSlots "${max}" --arg reservedSlot0 "$(cfg_reserved0)" --argjson assignments "${assignments}" \
+    '{maxSlots:$maxSlots,reservedSlot0:$reservedSlot0,assignments:$assignments}')"
+}
+
+list_worktrees_json() {
+  local records rows='[]' tk ty sl cp st br pa row
+  records="$(worktree_list_records)"
+  if [[ -n "${records}" ]]; then
+    while IFS=$'\t' read -r tk ty sl cp st br pa; do
+      [[ -n "${tk}" ]] || continue
+      row="$(jq -n -c --arg ticket "${tk}" --arg type "${ty}" --arg slot "${sl}" --arg component "${cp}" \
+        --arg state "${st}" --arg branch "${br}" --arg path "${pa}" \
+        '{ticket:$ticket,type:$type,slot:$slot,component:$component,state:$state,branch:$branch,path:$path}')"
+      rows="$(jq -c --argjson row "${row}" '. + [$row]' <<< "${rows}")"
+    done <<< "${records}"
+  fi
+  json_envelope "list" "$(jq -n -c --argjson worktrees "${rows}" '{worktrees:$worktrees}')"
+}
+
 # --- dispatch --------------------------------------------------------------
 main() {
   local cmd="${1:-help}"; shift || true
   case "${cmd}" in
     init)   [[ -f "${BIN_DIR}/../lib/init.sh" ]] || die "lib/init.sh not found (broken install)"; source "${BIN_DIR}/../lib/init.sh"; wtm_init "$@";;
-    doctor) [[ -f "${BIN_DIR}/../lib/init.sh" ]] || die "lib/init.sh not found (broken install)"; source "${BIN_DIR}/../lib/init.sh"; wtm_doctor;;
+    doctor) [[ -f "${BIN_DIR}/../lib/init.sh" ]] || die "lib/init.sh not found (broken install)"; source "${BIN_DIR}/../lib/init.sh"; parse_flags "$@"; wtm_doctor;;
     help|-h|--help) usage;;
     up|create)
-      need_config; parse_flags "$@"; consume_target_type
+      parse_flags "$@"; need_config; consume_target_type
       local ticket="${POS[0]:-}" desc="${POS[*]:1}"; validate_ticket "${ticket}"
       [[ -n "${BASE}" ]] || BASE="$(cfg_base_branch)"
       require_cmds git jq
-      if has_any_worktree "${ticket}"; then
-        info "Reusing existing worktree(s) for ${ticket}"; setup_ticket "${ticket}" "${NO_INSTALL}" "${SKIP_SEED}"
-      else
-        create_worktrees "$(comps_arg)" "${TYPE}" "${ticket}" "${desc}" "${BASE}" "${NO_INSTALL}" "${SKIP_SEED}"
-      fi
+      create_worktrees "$(comps_arg)" "${TYPE}" "${ticket}" "${desc}" "${BASE}" "${NO_INSTALL}" "${SKIP_SEED}"
       if [[ "${cmd}" == "up" ]]; then require_cmds tmux lsof; run_ticket "${ticket}" "${NO_INSTALL}"; fi
       ;;
-    setup)  need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; setup_ticket "${POS[0]}" "${NO_INSTALL}" "${SKIP_SEED}";;
-    run)    need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; require_cmds git jq tmux lsof; run_ticket "${POS[0]}" "${NO_INSTALL}";;
-    stop)   need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; require_cmds jq tmux; stop_ticket "${POS[0]}";;
-    delete) need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; require_cmds git jq; stop_ticket "${POS[0]}"; remove_ticket_worktrees "${POS[0]}" "${PRUNE}";;
-    logs)   need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; logs_ticket "${POS[0]}" "${POS[1]:-}" "${LINES}";;
-    status) need_config; parse_flags "$@"; cmd_status "${POS[0]:-}";;
-    slots)  need_config; parse_flags "$@"; if [[ -n "${MAX}" ]]; then cmd_set_max_slots "${MAX}"; else cmd_slots; fi;;
-    list)   need_config; parse_flags "$@"; list_worktrees "${LIST_MODE}";;
-    enter|path) need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; enter_ticket "${POS[0]}";;
-    cleanup) need_config; parse_flags "$@"; require_cmds git jq; cleanup_stale_worktrees "${FORCE}" "${PRUNE}";;
+    setup)  parse_flags "$@"; need_config; validate_ticket "${POS[0]:-}"; setup_ticket "${POS[0]}" "${NO_INSTALL}" "${SKIP_SEED}";;
+    run)    parse_flags "$@"; need_config; validate_ticket "${POS[0]:-}"; require_cmds git jq tmux lsof; run_ticket "${POS[0]}" "${NO_INSTALL}";;
+    stop)   parse_flags "$@"; need_config; validate_ticket "${POS[0]:-}"; require_cmds jq tmux; stop_ticket "${POS[0]}";;
+    delete) parse_flags "$@"; need_config; validate_ticket "${POS[0]:-}"; require_cmds git jq; stop_ticket "${POS[0]}"; remove_ticket_worktrees "${POS[0]}" "${PRUNE}";;
+    logs)   parse_flags "$@"; need_config; validate_ticket "${POS[0]:-}"; logs_ticket "${POS[0]}" "${POS[1]:-}" "${LINES}";;
+    status) parse_flags "$@"; need_config; cmd_status "${POS[0]:-}";;
+    slots)  parse_flags "$@"; need_config; if [[ -n "${MAX}" ]]; then cmd_set_max_slots "${MAX}"; else cmd_slots; fi;;
+    list)   parse_flags "$@"; need_config; list_worktrees "${LIST_MODE}";;
+    enter|path) parse_flags "$@"; need_config; validate_ticket "${POS[0]:-}"; enter_ticket "${POS[0]}";;
+    cleanup) parse_flags "$@"; need_config; require_cmds git jq; cleanup_stale_worktrees "${FORCE}" "${PRUNE}";;
     *) usage; die "Unknown command: ${cmd}";;
   esac
 }
