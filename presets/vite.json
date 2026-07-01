@@ -1,0 +1,17 @@
+{
+  "_preset": "vite",
+  "_doc": "Vite frontend. Point {peer.<api>.port.<name>} at your backend component.",
+  "repo": "path/to/web",
+  "ports": { "vite": 4200 },
+  "install": "pnpm install",
+  "installMarker": "node_modules",
+  "start": "VITE_PORT={port.vite} pnpm dev --port {port.vite}",
+  "env": {
+    "file": ".env.local",
+    "template": "{repoMain}/.env.local",
+    "set": { "VITE_API_URL": "http://localhost:{peer.api.port.http}/api" },
+    "requiredKeys": []
+  },
+  "health": "{port.vite}",
+  "runtime": "managed"
+}

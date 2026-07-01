@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# wtm — config-driven worktree + runtime manager.
+# Finds .wtm/config.json by walking up from CWD, then drives the generic engine.
+set -euo pipefail
+
+# Resolve through symlinks so a symlinked `wtm` on PATH still finds ../lib.
+WTM_SRC="${BASH_SOURCE[0]}"
+while [[ -L "${WTM_SRC}" ]]; do
+  WTM_LNK_DIR="$(cd -P "$(dirname "${WTM_SRC}")" && pwd)"
+  WTM_SRC="$(readlink "${WTM_SRC}")"
+  [[ "${WTM_SRC}" != /* ]] && WTM_SRC="${WTM_LNK_DIR}/${WTM_SRC}"
+done
+BIN_DIR="$(cd -P "$(dirname "${WTM_SRC}")" && pwd)"
+source "${BIN_DIR}/../lib/runtime.sh"   # pulls config/render/state/env/common/worktree/runtime
+
+usage() {
+  cat <<'EOF'
+wtm — config-driven worktree + runtime manager
+
+Usage:
+  wtm up [--target C] [--type T] TICKET [desc...]   create (or reuse) + run
+  wtm create [--target C] [--type T] TICKET [desc]  create worktrees only
+  wtm setup TICKET                                  seed + env + install (no run)
+  wtm run TICKET                                    run the stack for a ticket
+  wtm stop TICKET                                   stop the ticket's slot
+  wtm delete TICKET [--prune-branch]                stop + remove worktrees
+  wtm logs TICKET [component] [--lines N]           tail tmux logs
+  wtm status [TICKET]                               slot/component status table
+  wtm slots [--max N]                               slot -> ports table (or set slot count)
+  wtm list [--compact|--wide]                       list worktrees
+  wtm enter TICKET                                  print worktree paths
+  wtm cleanup [--force] [--prune-branch]            prune stale worktrees
+  wtm init                                          scaffold .wtm/config.json
+  wtm doctor                                        validate config
+  wtm help
+
+Options:
+  --target C   component(s): a name, comma-list, or "all" (default: all)
+  --type T     feature | fix | refactor (default: feature)
+  --base B     base branch (default: config baseBranch)
+  --no-install / --no-seed TAG / --force / --prune-branch / --lines N
+EOF
+}
+
+# --- flag parsing ----------------------------------------------------------
+TARGET="all"; TYPE="feature"; BASE=""; NO_INSTALL="false"; SKIP_SEED=""
+LIST_MODE="grouped"; FORCE="false"; PRUNE="false"; LINES="120"; MAX=""; POS=()
+
+parse_flags() {
+  while (($#)); do
+    case "$1" in
+      --target|-t) TARGET="$2"; shift 2;;
+      --type) is_valid_type "$2" || die "Invalid --type '$2' (feature|fix|refactor)"; TYPE="$2"; shift 2;;
+      --base) BASE="$2"; shift 2;;
+      --no-install) NO_INSTALL="true"; shift;;
+      --no-seed) SKIP_SEED="$2"; shift 2;;
+      --compact) LIST_MODE="compact"; shift;;
+      --wide) LIST_MODE="wide"; shift;;
+      --force) FORCE="true"; shift;;
+      --prune-branch) PRUNE="true"; shift;;
+      --lines) LINES="$2"; shift 2;;
+      --max|-n) MAX="$2"; shift 2;;
+      -h|--help) usage; exit 0;;
+      --*) die "Unknown option: $1";;
+      *) POS+=("$1"); shift;;
+    esac
+  done
+}
+
+need_config() { load_config || die "No .wtm/config.json found. Run 'wtm init' in your project root."; }
+
+positional_is_component() { [[ "$1" == "all" || "$1" == *,* ]] || cfg_has_component "$1"; }
+
+# Consume optional leading [component] [type] positionals for create/up.
+consume_target_type() {
+  if (( ${#POS[@]} )) && positional_is_component "${POS[0]}"; then TARGET="${POS[0]}"; POS=("${POS[@]:1}"); fi
+  if (( ${#POS[@]} )) && is_valid_type "${POS[0]:-}"; then TYPE="${POS[0]}"; POS=("${POS[@]:1}"); fi
+}
+
+comps_arg() { [[ "${TARGET}" == "all" ]] && echo "all" || echo "${TARGET//,/ }"; }
+
+# --- presentation ----------------------------------------------------------
+list_worktrees() {
+  local records mode="${1:-grouped}"; records="$(worktree_list_records)"
+  [[ -n "${records}" ]] || { echo "No worktrees found."; return 0; }
+  case "${mode}" in
+    wide)
+      printf "%-14s %-9s %-5s %-8s %-7s %-26s %s\n" TICKET TYPE SLOT COMPONENT STATE BRANCH PATH
+      while IFS=$'\t' read -r tk ty sl cp st br pa; do
+        printf "%-14s %-9s %-5s %-8s %-7s %-26s %s\n" "$tk" "$ty" "$sl" "$cp" "$st" "$br" "$pa"
+      done <<< "${records}" ;;
+    compact)
+      printf "%-14s %-9s %-5s %s\n" TICKET TYPE SLOT COMPONENTS
+      local cur="" repos="" ctk="" cty="" csl=""
+      while IFS=$'\t' read -r tk ty sl cp st br pa; do
+        if [[ -n "${cur}" && "${cur}" != "${tk}:${ty}" ]]; then
+          printf "%-14s %-9s %-5s %s\n" "$ctk" "$cty" "$csl" "$repos"; repos=""
+        fi
+        repos="${repos:+${repos}, }${cp}:${st}"; cur="${tk}:${ty}"; ctk="$tk"; cty="$ty"; csl="$sl"
+      done <<< "${records}"
+      [[ -n "${cur}" ]] && printf "%-14s %-9s %-5s %s\n" "$ctk" "$cty" "$csl" "$repos" ;;
+    *)
+      local cur=""
+      while IFS=$'\t' read -r tk ty sl cp st br pa; do
+        if [[ "${cur}" != "${tk}:${ty}" ]]; then
+          [[ -n "${cur}" ]] && echo; printf "%-14s %-9s slot:%s\n" "$tk" "$ty" "$sl"; cur="${tk}:${ty}"
+        fi
+        printf "  %-8s %-7s %s\n" "$cp" "$st" "$br"
+        printf "  %-8s %s\n" path "$pa"
+      done <<< "${records}" ;;
+  esac
+}
+
+status_row() {
+  local slot="$1" ticket="$2" comp cols=""
+  while IFS= read -r comp; do
+    is_managed "${comp}" || { cols+="${comp}:GUIDE "; continue; }
+    cols+="${comp}:$(component_status "${comp}" "${slot}") "
+  done < <(cfg_components)
+  printf "%-6s %-18s %s\n" "${slot}" "${ticket}" "${cols}"
+}
+
+cmd_status() {
+  need_config
+  printf "%-6s %-18s %s\n" SLOT TICKET COMPONENTS
+  printf '%s\n' '--------------------------------------------------------------'
+  local ticket="${1:-}" slot max
+  if [[ -n "${ticket}" ]]; then
+    slot="$(get_slot_for_ticket "${ticket}")"
+    [[ -n "${slot}" ]] || { has_any_worktree "${ticket}" && { status_row "-" "${ticket}"; return 0; }; die "No slot/worktree for ${ticket}"; }
+    status_row "${slot}" "${ticket}"; return 0
+  fi
+  max="$(cfg_max_slots)"
+  status_row 0 "$(cfg_reserved0)"
+  for slot in $(seq 1 $((max - 1))); do
+    ticket="$(find_ticket_by_slot "${slot}")"; [[ -n "${ticket}" ]] || ticket="-"
+    status_row "${slot}" "${ticket}"
+  done
+}
+
+# Set maxSlots in the config, with safety checks.
+cmd_set_max_slots() {
+  local n="$1"
+  [[ "${n}" =~ ^[0-9]+$ ]] || die "slot count must be a positive integer"
+  (( n >= 2 )) || die "maxSlots must be >= 2 (slot 0 is the reserved baseline)"
+  ensure_slots_file
+  local topused; topused="$(jq -r '[.slots[]] | max // 0' "$(slots_file)")"
+  if (( topused >= n )); then
+    die "Cannot set maxSlots=${n}: slot ${topused} is currently assigned ($(find_ticket_by_slot "${topused}")); usable slots would be 1..$((n - 1)). Free it (wtm delete/stop) or choose a higher number."
+  fi
+  local cur; cur="$(cfg_max_slots)"
+  local tmp; tmp="$(mktemp)"
+  jq --argjson n "${n}" '.maxSlots = $n' "${WTM_CONFIG}" > "${tmp}" && mv "${tmp}" "${WTM_CONFIG}"
+  # keep the slots-file meta in sync (cosmetic; allocation reads config)
+  if [[ -f "$(slots_file)" ]]; then
+    tmp="$(mktemp)"; jq --argjson n "${n}" '._meta.maxSlots = $n' "$(slots_file)" > "${tmp}" && mv "${tmp}" "$(slots_file)"
+  fi
+  success "maxSlots: ${cur} -> ${n}  (usable ticket slots 1..$((n - 1)); slot 0 reserved for $(cfg_reserved0))"
+}
+
+cmd_slots() {
+  need_config
+  local max; max="$(cfg_max_slots)"
+  info "maxSlots: ${max}  (usable ticket slots 1..$((max - 1)); slot 0 = $(cfg_reserved0)). Change with: wtm slots --max N"
+  printf "%-6s %-18s %s\n" SLOT TICKET PORTS
+  printf '%s\n' '--------------------------------------------------------------'
+  ensure_slots_file
+  local slot ticket comp name port ports
+  while IFS=' ' read -r ticket slot; do
+    [[ -n "${ticket}" ]] || continue
+    ports=""
+    while IFS= read -r comp; do
+      while read -r name port; do [[ -n "${port}" ]] && ports+="${comp}.${name}=${port} "; done < <(comp_ports "${comp}" "${slot}")
+    done < <(cfg_components)
+    printf "%-6s %-18s %s\n" "${slot}" "${ticket}" "${ports}"
+  done < <(jq -r '.slots | to_entries | sort_by(.value) | .[] | "\(.key) \(.value)"' "$(slots_file)")
+}
+
+# --- dispatch --------------------------------------------------------------
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "${cmd}" in
+    init)   [[ -f "${BIN_DIR}/../lib/init.sh" ]] || die "lib/init.sh not found (broken install)"; source "${BIN_DIR}/../lib/init.sh"; wtm_init "$@";;
+    doctor) [[ -f "${BIN_DIR}/../lib/init.sh" ]] || die "lib/init.sh not found (broken install)"; source "${BIN_DIR}/../lib/init.sh"; wtm_doctor;;
+    help|-h|--help) usage;;
+    up|create)
+      need_config; parse_flags "$@"; consume_target_type
+      local ticket="${POS[0]:-}" desc="${POS[*]:1}"; validate_ticket "${ticket}"
+      [[ -n "${BASE}" ]] || BASE="$(cfg_base_branch)"
+      require_cmds git jq
+      if has_any_worktree "${ticket}"; then
+        info "Reusing existing worktree(s) for ${ticket}"; setup_ticket "${ticket}" "${NO_INSTALL}" "${SKIP_SEED}"
+      else
+        create_worktrees "$(comps_arg)" "${TYPE}" "${ticket}" "${desc}" "${BASE}" "${NO_INSTALL}" "${SKIP_SEED}"
+      fi
+      if [[ "${cmd}" == "up" ]]; then require_cmds tmux lsof; run_ticket "${ticket}" "${NO_INSTALL}"; fi
+      ;;
+    setup)  need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; setup_ticket "${POS[0]}" "${NO_INSTALL}" "${SKIP_SEED}";;
+    run)    need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; require_cmds git jq tmux lsof; run_ticket "${POS[0]}" "${NO_INSTALL}";;
+    stop)   need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; require_cmds jq tmux; stop_ticket "${POS[0]}";;
+    delete) need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; require_cmds git jq; stop_ticket "${POS[0]}"; remove_ticket_worktrees "${POS[0]}" "${PRUNE}";;
+    logs)   need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; logs_ticket "${POS[0]}" "${POS[1]:-}" "${LINES}";;
+    status) need_config; parse_flags "$@"; cmd_status "${POS[0]:-}";;
+    slots)  need_config; parse_flags "$@"; if [[ -n "${MAX}" ]]; then cmd_set_max_slots "${MAX}"; else cmd_slots; fi;;
+    list)   need_config; parse_flags "$@"; list_worktrees "${LIST_MODE}";;
+    enter|path) need_config; parse_flags "$@"; validate_ticket "${POS[0]:-}"; enter_ticket "${POS[0]}";;
+    cleanup) need_config; parse_flags "$@"; require_cmds git jq; cleanup_stale_worktrees "${FORCE}" "${PRUNE}";;
+    *) usage; die "Unknown command: ${cmd}";;
+  esac
+}
+
+main "$@"

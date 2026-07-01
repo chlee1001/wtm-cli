@@ -1,0 +1,65 @@
+{
+  "project": "work-plus",
+  "baseBranch": "develop",
+  "maxSlots": 5,
+  "reservedSlot0": "develop",
+  "ticketPattern": "^[A-Z]+-[0-9]+$",
+  "sessionPrefix": "wp-slot",
+  "components": {
+    "server": {
+      "repo": "services/work-plus-server",
+      "seed": [
+        { "from": "{repoMain}/.claude", "to": ".claude", "tag": "agent" }
+      ],
+      "ports": { "http": 9080, "mysql": 3306, "valkey": 6379 },
+      "start": "WP_SLOT={slot} SERVER_PORT={port.http} VALKEY_PORT={port.valkey} LOCAL_DB_PORT={port.mysql} WP_VALKEY_NAME={sessionPrefix}{slot}-valkey ./start.sh",
+      "compose": { "file": "docker-compose.local.yml", "project": "{sessionPrefix}{slot}" },
+      "health": "{port.http}",
+      "runtime": "managed"
+    },
+    "web": {
+      "repo": "services/work-plus-web-v2",
+      "seed": [
+        { "from": "{repoMain}/.claude", "to": ".claude", "tag": "agent" }
+      ],
+      "ports": { "vite": 4200 },
+      "install": "pnpm install",
+      "installMarker": "node_modules",
+      "start": "VITE_PORT={port.vite} pnpm dev --port {port.vite}",
+      "env": {
+        "file": ".env.local",
+        "template": "{repoMain}/.env.local",
+        "set": {
+          "VITE_API_URL": "http://localhost:{peer.server.port.http}/api",
+          "VITE_FUSIONAUTH_REDIRECT_URI": "http://localhost:{port.vite}/auth/fusionauth-callback",
+          "VITE_FUSIONAUTH_POST_LOGOUT_REDIRECT_URI": "http://localhost:{port.vite}/login"
+        },
+        "requiredKeys": [
+          "VITE_API_MOCKING",
+          "VITE_API_VERSION",
+          "VITE_NAVER_MAP_CLIENT_ID",
+          "VITE_APP_TITLE",
+          "VITE_APP_ENV",
+          "VITE_ENABLE_SYSTEM_ADMIN",
+          "VITE_FUSIONAUTH_BASE_URL"
+        ]
+      },
+      "health": "{port.vite}",
+      "runtime": "managed"
+    },
+    "app": {
+      "repo": "services/work-plus-app",
+      "seed": [
+        { "from": "{repoMain}/.claude", "to": ".claude", "tag": "agent" }
+      ],
+      "asciiPathOnly": true,
+      "install": "yarn install",
+      "runtime": "guide",
+      "guide": [
+        "cd {path}",
+        "yarn start:dev    # Metro on fixed port 8081 (not slot-isolated)",
+        "yarn ios:dev  or  yarn android:dev"
+      ]
+    }
+  }
+}

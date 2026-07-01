@@ -1,0 +1,10 @@
+{
+  "_preset": "spring-gradle",
+  "_doc": "Spring Boot via Gradle, optionally with a per-slot docker compose (db/cache).",
+  "repo": "path/to/server",
+  "ports": { "http": 8080, "db": 3306 },
+  "start": "SERVER_PORT={port.http} DB_PORT={port.db} ./gradlew bootRun --args='--server.port={port.http}'",
+  "compose": { "file": "docker-compose.local.yml", "project": "{sessionPrefix}{slot}" },
+  "health": "{port.http}",
+  "runtime": "managed"
+}

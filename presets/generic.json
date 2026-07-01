@@ -1,0 +1,10 @@
+{
+  "_preset": "generic",
+  "_doc": "Any long-running command. Fill repo/ports/start. Duplicate the block per component.",
+  "repo": "path/to/repo",
+  "ports": { "http": 8000 },
+  "install": null,
+  "start": "PORT={port.http} ./run.sh",
+  "health": "{port.http}",
+  "runtime": "managed"
+}

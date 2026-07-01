@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://claude-skills/wtm/config.schema.json",
+  "title": "wtm project manifest",
+  "type": "object",
+  "required": ["project", "components"],
+  "additionalProperties": false,
+  "properties": {
+    "project": { "type": "string", "description": "Project identifier" },
+    "baseBranch": { "type": "string", "default": "main" },
+    "maxSlots": { "type": "integer", "minimum": 2, "default": 5,
+      "description": "slot 0 is the reserved shared baseline; tickets get 1..maxSlots-1" },
+    "reservedSlot0": { "type": "string", "default": "develop",
+      "description": "Display name for the reserved slot 0 baseline" },
+    "ticketPattern": { "type": "string", "default": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Regex a ticket id must match. Use Jira-style ^[A-Z]+-[0-9]+$ if desired." },
+    "sessionPrefix": { "type": "string", "default": "wtm-slot",
+      "description": "Prefix for tmux sessions and docker compose project names" },
+    "seed": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/seedItem" },
+      "description": "Project-wide files/dirs to copy into every fresh worktree (gitignored artifacts)"
+    },
+    "components": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/definitions/component" }
+    }
+  },
+  "definitions": {
+    "seedItem": {
+      "type": "object",
+      "required": ["from", "to"],
+      "additionalProperties": false,
+      "properties": {
+        "from": { "type": "string", "description": "Source path template ({repoMain},{home},{shellenv.X},~ supported)" },
+        "to": { "type": "string", "description": "Destination relative to the worktree path" },
+        "overwrite": { "type": "boolean", "default": false, "description": "Copy even if destination exists (default: skip if present)" },
+        "tag": { "type": "string", "description": "Optional label so the CLI can skip a group (e.g. --skip-seed agent)" }
+      }
+    },
+    "component": {
+      "type": "object",
+      "required": ["repo"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": { "type": "string", "description": "Path to the main repo, relative to project root" },
+        "worktreeRoot": { "type": "string", "description": "Defaults to \"<repo>.worktrees\"" },
+        "ports": {
+          "type": "object",
+          "additionalProperties": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "description": "Named base ports. Actual port = base + slot."
+        },
+        "seed": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/seedItem" },
+          "description": "Files/dirs to copy into this component's worktree on create (e.g. .claude, certs)"
+        },
+        "install": { "type": "string", "description": "Install command template (run in worktree)" },
+        "installMarker": { "type": "string", "description": "Dir/file whose presence means deps are installed (e.g. node_modules)" },
+        "start": { "type": "string", "description": "Start command template (run in worktree via tmux)" },
+        "compose": {
+          "type": "object",
+          "required": ["file", "project"],
+          "additionalProperties": false,
+          "properties": {
+            "file": { "type": "string", "description": "compose file path relative to component repo" },
+            "project": { "type": "string", "description": "compose -p project name template" }
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "file": { "type": "string", "description": "env file path relative to worktree" },
+            "template": { "type": "string", "description": "Fallback template to copy when file is missing/incomplete" },
+            "set": { "type": "object", "additionalProperties": { "type": "string" },
+              "description": "Key -> value template pairs to force-write" },
+            "requiredKeys": { "type": "array", "items": { "type": "string" },
+              "description": "If any is missing, env file is re-hydrated from template" }
+          }
+        },
+        "asciiPathOnly": { "type": "boolean", "default": false,
+          "description": "Refuse non-ASCII worktree paths (RN/Metro/iOS toolchains)" },
+        "runtime": { "type": "string", "enum": ["managed", "guide"], "default": "managed",
+          "description": "managed = wtm runs it; guide = wtm prepares worktree and prints manual steps" },
+        "health": { "type": "string", "description": "Port template to check for liveness after start" },
+        "guide": { "type": "array", "items": { "type": "string" },
+          "description": "Manual run steps printed when runtime=guide" }
+      }
+    }
+  }
+}

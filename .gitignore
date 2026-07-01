@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# Internal design notes (kept local, not published)
+docs/
+
+# Local-only test that references a machine-specific absolute path
+tests/parity_test.sh
+
+# Local agent / OMC tooling — not part of the wtm tool
+.claude/
+.omc/
+.omx/
+.omg/
+
+# wtm runtime state (created when running wtm inside a project)
+.wtm/
+.worktree-slots.json*
+
+# Scratch
+*.tmp
+*.log
