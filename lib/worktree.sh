@@ -78,7 +78,7 @@ create_one_worktree() { # <comp> <type> <ticket> <desc> <base>
 
   if [[ -d "${wpath}" ]]; then
     if is_live_worktree_dir "${wpath}"; then warn "${comp} worktree already exists: ${wpath}"; return 0; fi
-    die "Stale ${comp} worktree at ${wpath}. Run: wtm cleanup --force"
+    die_code "stale_worktree" "Stale ${comp} worktree at ${wpath}. Run: wtm cleanup --force"
   fi
   mkdir -p "$(dirname "${wpath}")"
   if git -C "${repo}" show-ref --verify --quiet "refs/heads/${branch}"; then
@@ -111,7 +111,7 @@ setup_ticket() { # <ticket> <no_install> <skip_seed_tags>
     read -r slot state <<< "${slot_info}"
     info "Slot ${slot} (${state}) for ${ticket}"
   else
-    warn "No available slots for ${ticket}; continuing without slot"; slot=""
+    die_code "slot_exhausted" "No available slots for ${ticket}"
   fi
   local comp wpath
   while IFS= read -r comp; do
@@ -128,7 +128,17 @@ create_worktrees() { # <comps_space_sep|all> <type> <ticket> <desc> <base> <no_i
   [[ "${comps}" == "all" ]] && comps="$(cfg_components | tr '\n' ' ')"
   local comp
   for comp in ${comps}; do
-    cfg_has_component "${comp}" || die "Unknown component: ${comp}"
+    cfg_has_component "${comp}" || die_code "unknown_component" "Unknown component: ${comp}"
+  done
+  local slot_info
+  slot_info="$(get_or_assign_slot "${ticket}")" || die_code "slot_exhausted" "No available slots for ${ticket}"
+  local existing
+  for comp in ${comps}; do
+    existing="$(find_worktree_path_by_comp "${comp}" "${ticket}")"
+    if [[ -n "${existing}" ]]; then
+      warn "${comp} worktree already exists: ${existing}"
+      continue
+    fi
     create_one_worktree "${comp}" "${type}" "${ticket}" "${desc}" "${base}"
   done
   setup_ticket "${ticket}" "${no_install}" "${skip_seed}"
